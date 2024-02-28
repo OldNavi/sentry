@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from django.db.models import Q
 
 from sentry import features
+from sentry.constants import ObjectStatus
 from sentry.grouping.utils import hash_from_values
 from sentry.issues.grouptype import (
     MonitorCheckInFailure,
@@ -24,6 +25,9 @@ from sentry.monitors.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+NUM_CONSECUTIVE_BROKEN_CHECKINS = 4
+NUM_DAYS_BROKEN_PERIOD = 3
 
 
 def mark_failed(
@@ -181,6 +185,47 @@ def mark_failed_threshold(failed_checkin: MonitorCheckIn, failure_issue_threshol
 
         # get the existing grouphash from the monitor environment
         fingerprint = monitor_env.incident_grouphash
+
+        # for broken monitor detection evaluate if this environment qualifies
+        has_broken_monitor_detection = False
+        try:
+            organization = Organization.objects.get_from_cache(
+                id=monitor_env.monitor.organization_id
+            )
+            has_broken_monitor_detection = features.has(
+                "organizations:crons-broken-monitor-detection", organization=organization
+            )
+        except Organization.DoesNotExist:
+            pass
+
+        if has_broken_monitor_detection:
+            previous_checkins = list(
+                reversed(
+                    MonitorCheckIn.objects.filter(
+                        monitor_environment=monitor_env, date_added__lte=failed_checkin.date_added
+                    )
+                    .order_by("-date_added")
+                    .values("id", "date_added", "status")[:NUM_CONSECUTIVE_BROKEN_CHECKINS]
+                )
+            )
+            days_failing = (failed_checkin.date_added - monitor_env.last_status_change).days
+
+            if (
+                len(previous_checkins) == NUM_CONSECUTIVE_BROKEN_CHECKINS
+                and all(
+                    [
+                        checkin.status
+                        in [CheckInStatus.ERROR, CheckInStatus.TIMEOUT, CheckInStatus.MISSED]
+                        for checkin in previous_checkins
+                    ]
+                )
+                and days_failing >= NUM_DAYS_BROKEN_PERIOD
+                and not monitor_muted
+                and not monitor_env.monitor.status == ObjectStatus.DISABLED
+            ):
+                # send email to notify customer
+                pass
+
     else:
         # don't send occurrence for other statuses
         return False
@@ -279,10 +324,12 @@ def create_issue_platform_occurrence(
         project_id=monitor_env.monitor.project_id,
         event_id=uuid.uuid4().hex,
         fingerprint=[
-            fingerprint
-            if fingerprint
-            else hash_from_values(
-                ["monitor", str(monitor_env.monitor.guid), occurrence_data["reason"]]
+            (
+                fingerprint
+                if fingerprint
+                else hash_from_values(
+                    ["monitor", str(monitor_env.monitor.guid), occurrence_data["reason"]]
+                )
             )
         ],
         type=occurrence_data["group_type"],
@@ -314,13 +361,15 @@ def create_issue_platform_occurrence(
         "contexts": {"monitor": get_monitor_environment_context(monitor_env)},
         "environment": monitor_env.get_environment().name,
         "event_id": occurrence.event_id,
-        "fingerprint": [fingerprint]
-        if fingerprint
-        else [
-            "monitor",
-            str(monitor_env.monitor.guid),
-            occurrence_data["reason"],
-        ],
+        "fingerprint": (
+            [fingerprint]
+            if fingerprint
+            else [
+                "monitor",
+                str(monitor_env.monitor.guid),
+                occurrence_data["reason"],
+            ]
+        ),
         "platform": "other",
         "project_id": monitor_env.monitor.project_id,
         "received": current_timestamp.isoformat(),
