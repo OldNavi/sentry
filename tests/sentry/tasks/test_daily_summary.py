@@ -186,7 +186,9 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
         perf_event2 = self.create_performance_issue(
             fingerprint=f"{PerformanceNPlusOneGroupType.type_id}-group6"
         )
-        summary = prepare_summary_data(to_timestamp(self.now), ONE_DAY, self.organization.id)
+        summary = prepare_summary_data(
+            to_timestamp(self.now), ONE_DAY, self.organization.id, [self.user.id]
+        )
         project_id = self.project.id
 
         assert (
