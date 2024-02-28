@@ -96,6 +96,10 @@ audit_logger = logging.getLogger("sentry.audit.api")
 api_access_logger = logging.getLogger("sentry.access.api")
 
 
+class PaginatedResponse(Response):
+    pass
+
+
 def allow_cors_options(func):
     """
     Decorator that adds automatic handling of OPTIONS requests for CORS
@@ -508,7 +512,7 @@ class Endpoint(APIView):
         response_kwargs=None,
         count_hits=None,
         **paginator_kwargs,
-    ):
+    ) -> PaginatedResponse:
         try:
             per_page = self.get_per_page(request, default_per_page, max_per_page)
             cursor = self.get_cursor_from_request(request, cursor_cls)
@@ -542,7 +546,7 @@ class Endpoint(APIView):
 
         response = response_cls(results, **response_kwargs)
         self.add_cursor_headers(request, response, cursor_result)
-        return response
+        return PaginatedResponse(response)
 
 
 class EnvironmentMixin:

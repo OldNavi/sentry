@@ -4,7 +4,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 from sentry.api.api_publish_status import ApiPublishStatus
-from sentry.api.base import Endpoint, control_silo_endpoint
+from sentry.api.base import Endpoint, PaginatedResponse, control_silo_endpoint
 from sentry.api.paginator import OffsetPaginator
 from sentry.api.serializers import serialize
 from sentry.models.apiapplication import ApiApplication, ApiApplicationStatus
@@ -19,7 +19,7 @@ class ApiApplicationsEndpoint(Endpoint):
     authentication_classes = (SessionAuthentication,)
     permission_classes = (IsAuthenticated,)
 
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> PaginatedResponse:
         queryset = ApiApplication.objects.filter(
             owner_id=request.user.id, status=ApiApplicationStatus.active
         )
