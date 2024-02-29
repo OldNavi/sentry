@@ -2,27 +2,45 @@ import copy
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
+import responses
+from django.conf import settings
+
 from sentry.constants import DataCategory
 from sentry.issues.grouptype import PerformanceNPlusOneGroupType
 from sentry.models.activity import Activity
 from sentry.models.group import GroupStatus
+from sentry.notifications.notifications.daily_summary import DailySummaryNotification
 from sentry.services.hybrid_cloud.user_option import user_option_service
-from sentry.tasks.summaries.daily_summary import build_summary_data, schedule_organizations
+from sentry.tasks.summaries.daily_summary import (
+    build_summary_data,
+    build_top_projects_map,
+    deliver_summary,
+    schedule_organizations,
+)
 from sentry.tasks.summaries.utils import ONE_DAY
-from sentry.testutils.cases import OutcomesSnubaTest, PerformanceIssueTestCase, SnubaTestCase
+from sentry.testutils.cases import (
+    OutcomesSnubaTest,
+    PerformanceIssueTestCase,
+    SlackActivityNotificationTest,
+    SnubaTestCase,
+)
 from sentry.testutils.factories import DEFAULT_EVENT_DATA
 from sentry.testutils.helpers.datetime import before_now, freeze_time, iso_format
 from sentry.testutils.helpers.features import with_feature
+from sentry.testutils.helpers.slack import get_blocks_and_fallback_text
 from sentry.testutils.silo import region_silo_test
 from sentry.types.activity import ActivityType
 from sentry.types.group import GroupSubStatus
+from sentry.types.integrations import ExternalProviders
 from sentry.utils.dates import to_timestamp
 from sentry.utils.outcomes import Outcome
 
 
 @region_silo_test
 @freeze_time(before_now(days=2).replace(hour=0, minute=5, second=0, microsecond=0))
-class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCase):
+class DailySummaryTest(
+    OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCase, SlackActivityNotificationTest
+):
     def store_event_and_outcomes(
         self, project_id, timestamp, fingerprint, category, release=None, resolve=True
     ):
@@ -62,6 +80,11 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
         return group
 
     def setUp(self):
+        responses.add(
+            method=responses.POST,
+            url=f"{settings.SENTRY_SNUBA}/tests/outcomes/drop",
+            status=200,
+        )
         super().setUp()
         self.now = datetime.now().replace(tzinfo=timezone.utc)
         self.two_hours_ago = self.now - timedelta(hours=2)
@@ -78,42 +101,9 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
         )
         self.release = self.create_release(project=self.project, date_added=self.now)
 
-    @with_feature("organizations:daily-summary")
-    @mock.patch("sentry.tasks.summaries.daily_summary.prepare_summary_data")
-    def test_schedule_organizations(self, mock_prepare_summary_data):
-        user2 = self.create_user()
-        self.create_member(teams=[self.team], user=user2, organization=self.organization)
-        for _ in range(2):
-            self.store_event_and_outcomes(
-                self.project.id,
-                self.three_days_ago,
-                fingerprint="group-1",
-                category=DataCategory.ERROR,
-            )
-        for _ in range(2):
-            self.store_event_and_outcomes(
-                self.project.id,
-                self.now,
-                fingerprint="group-2",
-                category=DataCategory.ERROR,
-            )
-
-        with self.tasks():
-            schedule_organizations(timestamp=to_timestamp(self.now))
-
-        # user2's local timezone is UTC and therefore it isn't sent now
-        assert mock_prepare_summary_data.delay.call_count == 1
-        for call_args in mock_prepare_summary_data.delay.call_args_list:
-            assert call_args.args == (
-                to_timestamp(self.now),
-                ONE_DAY,
-                self.organization.id,
-                [self.user.id],
-            )
-
-    def test_build_summary_data(self):
+    def populate_event_data(self):
         for _ in range(6):
-            group1 = self.store_event_and_outcomes(
+            self.group1 = self.store_event_and_outcomes(
                 self.project.id,
                 self.three_days_ago,
                 fingerprint="group-1",
@@ -136,7 +126,7 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
 
         # create an issue first seen in the release and set it to regressed
         for _ in range(2):
-            group2 = self.store_event_and_outcomes(
+            self.group2 = self.store_event_and_outcomes(
                 self.project.id,
                 self.now,
                 fingerprint="group-2",
@@ -144,19 +134,19 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
                 release=self.release.version,
                 resolve=False,
             )
-        group2.substatus = GroupSubStatus.REGRESSED
-        group2.save()
+        self.group2.substatus = GroupSubStatus.REGRESSED
+        self.group2.save()
         Activity.objects.create_group_activity(
-            group2,
+            self.group2,
             ActivityType.SET_REGRESSION,
             data={
-                "event_id": group2.get_latest_event().event_id,
+                "event_id": self.group2.get_latest_event().event_id,
                 "version": self.release.version,
             },
         )
         # create and issue and set it to escalating
         for _ in range(10):
-            group3 = self.store_event_and_outcomes(
+            self.group3 = self.store_event_and_outcomes(
                 self.project.id,
                 self.now,
                 fingerprint="group-3",
@@ -164,20 +154,20 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
                 release=self.release.version,
                 resolve=False,
             )
-        group3.substatus = GroupSubStatus.ESCALATING
-        group3.save()
+        self.group3.substatus = GroupSubStatus.ESCALATING
+        self.group3.save()
         Activity.objects.create_group_activity(
-            group3,
+            self.group3,
             ActivityType.SET_ESCALATING,
             data={
-                "event_id": group3.get_latest_event().event_id,
+                "event_id": self.group3.get_latest_event().event_id,
                 "version": self.release.version,
             },
         )
 
         # store an event in another project to be sure they're in separate buckets
         for _ in range(2):
-            group4 = self.store_event_and_outcomes(
+            self.group4 = self.store_event_and_outcomes(
                 self.project2.id,
                 self.now,
                 fingerprint="group-4",
@@ -185,12 +175,35 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
             )
 
         # store some performance issues
-        perf_event = self.create_performance_issue(
+        self.perf_event = self.create_performance_issue(
             fingerprint=f"{PerformanceNPlusOneGroupType.type_id}-group5"
         )
-        perf_event2 = self.create_performance_issue(
+        self.perf_event2 = self.create_performance_issue(
             fingerprint=f"{PerformanceNPlusOneGroupType.type_id}-group6"
         )
+
+    @with_feature("organizations:daily-summary")
+    @mock.patch("sentry.tasks.summaries.daily_summary.prepare_summary_data")
+    def test_schedule_organizations(self, mock_prepare_summary_data):
+        user2 = self.create_user()
+        self.create_member(teams=[self.team], user=user2, organization=self.organization)
+        self.populate_event_data()
+
+        with self.tasks():
+            schedule_organizations(timestamp=to_timestamp(self.now))
+
+        # user2's local timezone is UTC and therefore it isn't sent now
+        assert mock_prepare_summary_data.delay.call_count == 1
+        for call_args in mock_prepare_summary_data.delay.call_args_list:
+            assert call_args.args == (
+                to_timestamp(self.now),
+                ONE_DAY,
+                self.organization.id,
+                [self.user.id],
+            )
+
+    def test_build_summary_data(self):
+        self.populate_event_data()
         summary = build_summary_data(
             timestamp=to_timestamp(self.now),
             duration=ONE_DAY,
@@ -204,26 +217,98 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
         )  # total outcomes from today
         assert summary.projects_context_map[project_id].comparison_period_avg == 1
         assert len(summary.projects_context_map[project_id].key_errors) == 3
-        assert (group1, None, 3) in summary.projects_context_map[project_id].key_errors
-        assert (group2, None, 2) in summary.projects_context_map[project_id].key_errors
-        assert (group3, None, 10) in summary.projects_context_map[project_id].key_errors
+        assert (self.group1, None, 3) in summary.projects_context_map[project_id].key_errors
+        assert (self.group2, None, 2) in summary.projects_context_map[project_id].key_errors
+        assert (self.group3, None, 10) in summary.projects_context_map[project_id].key_errors
         assert len(summary.projects_context_map[project_id].key_performance_issues) == 2
-        assert (perf_event.group, None, 1) in summary.projects_context_map[
+        assert (self.perf_event.group, None, 1) in summary.projects_context_map[
             project_id
         ].key_performance_issues
-        assert (perf_event2.group, None, 1) in summary.projects_context_map[
+        assert (self.perf_event2.group, None, 1) in summary.projects_context_map[
             project_id
         ].key_performance_issues
-        assert summary.projects_context_map[project_id].escalated_today == [group3]
-        assert summary.projects_context_map[project_id].regressed_today == [group2]
-        assert group2 in summary.projects_context_map[project_id].new_in_release[self.release.id]
-        assert group3 in summary.projects_context_map[project_id].new_in_release[self.release.id]
+        assert summary.projects_context_map[project_id].escalated_today == [self.group3]
+        assert summary.projects_context_map[project_id].regressed_today == [self.group2]
+        assert (
+            self.group2 in summary.projects_context_map[project_id].new_in_release[self.release.id]
+        )
+        assert (
+            self.group3 in summary.projects_context_map[project_id].new_in_release[self.release.id]
+        )
 
         project_id2 = self.project2.id
         assert summary.projects_context_map[project_id2].total_today == 2
         assert summary.projects_context_map[project_id2].comparison_period_avg == 0
-        assert summary.projects_context_map[project_id2].key_errors == [(group4, None, 2)]
+        assert summary.projects_context_map[project_id2].key_errors == [(self.group4, None, 2)]
         assert summary.projects_context_map[project_id2].key_performance_issues == []
         assert summary.projects_context_map[project_id2].escalated_today == []
         assert summary.projects_context_map[project_id2].regressed_today == []
         assert summary.projects_context_map[project_id2].new_in_release == {}
+
+    @mock.patch("sentry.notifications.notifications.base.BaseNotification.send")
+    def test_deliver_summary(self, mock_send):
+        self.populate_event_data()
+        summary = build_summary_data(
+            timestamp=to_timestamp(self.now),
+            duration=ONE_DAY,
+            organization=self.organization,
+            daily=True,
+        )
+        with self.tasks():
+            deliver_summary(summary, [self.user.id])
+
+        assert mock_send.call_count == 1
+
+    def test_build_top_projects_map(self):
+        self.populate_event_data()
+        project3 = self.create_project(
+            name="barf", organization=self.organization, teams=[self.team]
+        )
+        project3.first_event = self.three_days_ago
+        for _ in range(15):
+            self.store_event_and_outcomes(
+                project3.id,
+                self.now,
+                fingerprint="group-1",
+                category=DataCategory.ERROR,
+            )
+        context = build_summary_data(
+            timestamp=to_timestamp(self.now),
+            duration=ONE_DAY,
+            organization=self.organization,
+            daily=True,
+        )
+        top_projects_context_map = build_top_projects_map(context)
+        assert list(top_projects_context_map.keys()) == [self.project.id, project3.id]
+
+    @responses.activate
+    @with_feature("organizations:slack-block-kit")
+    def test_slack_message_contents(self):
+        self.populate_event_data()
+        # CEO: not sure how to activate responses and also store events
+        # it's mad I haven't mocked  POST http://127.0.0.1:1218/tests/entities/groupedmessage/insert
+        # in self.create_group. I hope I'm doing this wrong and there is an easier way
+        responses.add(
+            method=responses.POST,
+            url="https://slack.com/api/chat.postMessage",
+            body='{"ok": true}',
+            status=200,
+            content_type="application/json",
+        )
+
+        context = build_summary_data(
+            timestamp=to_timestamp(self.now),
+            duration=ONE_DAY,
+            organization=self.organization,
+            daily=True,
+        )
+        top_projects_context_map = build_top_projects_map(context)
+        with self.tasks():
+            DailySummaryNotification(
+                organization=context.organization,
+                recipient=self.user,
+                provider=ExternalProviders.SLACK,
+                project_context=top_projects_context_map,
+            ).send()
+        blocks, fallback_text = get_blocks_and_fallback_text()
+        assert blocks
