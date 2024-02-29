@@ -49,7 +49,7 @@ export default function JsonViewer(props: ViewerProps) {
 
   return (
     <PreviewPanelItem>
-      <StyledStructuredData data={json} maxDefaultDepth={4} preserveQuotes />
+      <StyledJsonData data={json} maxDefaultDepth={4} />
     </PreviewPanelItem>
   );
 }
@@ -60,7 +60,7 @@ const LoadingContainer = styled('div')`
   padding: ${space(1)};
 `;
 
-const StyledStructuredData = styled(StructuredEventData)`
+const StyledJsonData = styled(StructuredEventData)`
   margin-bottom: 0;
   width: 100%;
 `;
