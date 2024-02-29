@@ -137,9 +137,7 @@ def project_key_errors(
         return None
     # Take the 3 most frequently occuring events
     prefix = (
-        "daily_summary"
-        if referrer == Referrer.DAILY_SUMMARY_KEY_PERFORMANCE_ISSUES.value
-        else "weekly_reports"
+        "daily_summary" if referrer == Referrer.DAILY_SUMMARY_KEY_ERRORS.value else "weekly_reports"
     )
     op = f"{prefix}.project_key_errors"
 
