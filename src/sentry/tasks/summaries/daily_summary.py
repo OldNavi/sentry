@@ -122,11 +122,32 @@ def prepare_summary_data(
     users_to_send_to: list[int],
 ):
     # build 'Today's Event Count vs. 14 day average'. we need 15 days of data for this
-    comparison_offset = ONE_DAY * COMPARISON_PERIOD + 1
     organization = Organization.objects.get(id=organization_id)
+    ctx = build_summary_data(
+        timestamp=timestamp, duration=duration, organization=organization, daily=True
+    )
+    with sentry_sdk.start_span(op="daily_summary.check_if_ctx_is_empty"):
+        report_is_available = not check_if_ctx_is_empty(ctx)
+    set_tag("report.available", report_is_available)
+
+    if not report_is_available:
+        logger.info(
+            "prepare_organization_report.skipping_empty", extra={"organization": organization_id}
+        )
+        return
+
+    with sentry_sdk.start_span(op="daily_summary.deliver_summary"):
+        deliver_summary(ctx=ctx, users=users_to_send_to)
+
+
+def build_summary_data(
+    timestamp: float, duration: int, organization: Organization, daily: bool
+) -> OrganizationReportContext:
+    comparison_offset = ONE_DAY * COMPARISON_PERIOD + 1
     set_tag("org.slug", organization.slug)
-    set_tag("org.id", organization_id)
-    ctx = OrganizationReportContext(timestamp, duration, organization, daily=True)
+    set_tag("org.id", organization.id)
+    ctx = OrganizationReportContext(timestamp, duration, organization, daily)
+
     with sentry_sdk.start_span(op="daily_summary.user_project_ownership"):
         user_project_ownership(ctx)
 
@@ -207,18 +228,7 @@ def prepare_summary_data(
     with sentry_sdk.start_span(op="daily_summary.fetch_key_performance_issue_groups"):
         fetch_key_performance_issue_groups(ctx)
 
-    with sentry_sdk.start_span(op="daily_summary.check_if_ctx_is_empty"):
-        report_is_available = not check_if_ctx_is_empty(ctx)
-    set_tag("report.available", report_is_available)
-
-    if not report_is_available:
-        logger.info(
-            "prepare_organization_report.skipping_empty", extra={"organization": organization_id}
-        )
-        return
-
-    with sentry_sdk.start_span(op="daily_summary.deliver_summary"):
-        deliver_summary(ctx=ctx, users=users_to_send_to)
+    return ctx
 
 
 def deliver_summary(ctx: OrganizationReportContext, users: list[int]):

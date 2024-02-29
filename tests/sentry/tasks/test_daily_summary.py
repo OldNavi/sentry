@@ -7,7 +7,7 @@ from sentry.issues.grouptype import PerformanceNPlusOneGroupType
 from sentry.models.activity import Activity
 from sentry.models.group import GroupStatus
 from sentry.services.hybrid_cloud.user_option import user_option_service
-from sentry.tasks.summaries.daily_summary import prepare_summary_data, schedule_organizations
+from sentry.tasks.summaries.daily_summary import build_summary_data, schedule_organizations
 from sentry.tasks.summaries.utils import ONE_DAY
 from sentry.testutils.cases import OutcomesSnubaTest, PerformanceIssueTestCase, SnubaTestCase
 from sentry.testutils.factories import DEFAULT_EVENT_DATA
@@ -104,9 +104,14 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
         # user2's local timezone is UTC and therefore it isn't sent now
         assert mock_prepare_summary_data.delay.call_count == 1
         for call_args in mock_prepare_summary_data.delay.call_args_list:
-            assert call_args.args == (to_timestamp(self.now), ONE_DAY, self.organization.id)
+            assert call_args.args == (
+                to_timestamp(self.now),
+                ONE_DAY,
+                self.organization.id,
+                [self.user.id],
+            )
 
-    def test_prepare_summary_data(self):
+    def test_build_summary_data(self):
         for _ in range(6):
             group1 = self.store_event_and_outcomes(
                 self.project.id,
@@ -186,8 +191,11 @@ class DailySummaryTest(OutcomesSnubaTest, SnubaTestCase, PerformanceIssueTestCas
         perf_event2 = self.create_performance_issue(
             fingerprint=f"{PerformanceNPlusOneGroupType.type_id}-group6"
         )
-        summary = prepare_summary_data(
-            to_timestamp(self.now), ONE_DAY, self.organization.id, [self.user.id]
+        summary = build_summary_data(
+            timestamp=to_timestamp(self.now),
+            duration=ONE_DAY,
+            organization=self.organization,
+            daily=True,
         )
         project_id = self.project.id
 
