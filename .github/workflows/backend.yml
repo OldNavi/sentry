@@ -327,6 +327,50 @@ jobs:
           github-token: ${{ steps.token.outputs.token }}
           message: ':knife: regenerate mypy module blocklist'
 
+  backend-redis-cluster-test:
+    if: needs.files-changed.outputs.backend == 'true'
+    needs: files-changed
+    runs-on: ubuntu-latest
+    name: backend redis cluster tests
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pg-version: ['14']
+
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          # Avoid codecov error message related to SHA resolution:
+          # https://github.com/codecov/codecov-bash/blob/7100762afbc822b91806a6574658129fe0d23a7d/codecov#L891
+          fetch-depth: '2'
+
+      - name: Setup sentry env
+        uses: ./.github/actions/setup-sentry
+        id: setup
+        with:
+          redis_cluster: true
+          kafka: true
+          snuba: true
+          symbolicator: true
+          # Right now, we run so few bigtable related tests that the
+          # overhead of running bigtable in all backend tests
+          # is way smaller than the time it would take to run in its own job.
+          bigtable: true
+          pg-version: ${{ matrix.pg-version }}
+
+      - name: Run redis cluster backend test
+        run: |
+          PYTEST_ADDOPTS="$PYTEST_ADDOPTS -m redis_cluster" make test-python-ci
+
+      # Upload coverage data even if running the tests step fails since
+      # it reduces large coverage fluctuations
+      - name: Handle artifacts
+        if: ${{ always() }}
+        uses: ./.github/actions/artifacts
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
   # This check runs once all dependent jobs have passed
   # It symbolizes that all required Backend checks have succesfully passed (Or skipped)
   # This step is the only required backend check
@@ -336,6 +380,7 @@ jobs:
         api-docs,
         backend-test,
         backend-migration-tests,
+        backend-redis-cluster-test,
         cli,
         files-changed,
         requirements,
