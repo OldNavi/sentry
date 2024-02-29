@@ -175,9 +175,7 @@ class Symbolicator:
         )
         return process_response(res)
 
-    def process_payload(
-        self, stacktraces, modules, signal=None, apply_source_context=True
-    ):
+    def process_payload(self, stacktraces, modules, signal=None, apply_source_context=True):
         (sources, process_response) = sources_for_symbolication(self.project)
         scraping_config = get_scraping_config(self.project)
         json = {
@@ -197,9 +195,7 @@ class Symbolicator:
         res = self._process("symbolicate_stacktraces", "symbolicate", json=json)
         return process_response(res)
 
-    def process_js(
-        self, stacktraces, modules, release, dist, apply_source_context=True
-    ):
+    def process_js(self, stacktraces, modules, release, dist, apply_source_context=True):
         source = get_internal_artifact_lookup_source(self.project)
         scraping_config = get_scraping_config(self.project)
 
@@ -212,9 +208,7 @@ class Symbolicator:
         }
 
         try:
-            debug_id_index, url_index = get_bundle_index_urls(
-                self.project, release, dist
-            )
+            debug_id_index, url_index = get_bundle_index_urls(self.project, release, dist)
             if debug_id_index:
                 json["debug_id_index"] = debug_id_index
             if url_index:
@@ -250,9 +244,7 @@ class Symbolicator:
         if release_package is not None:
             json["release_package"] = release_package
 
-        return self._process(
-            "symbolicate_jvm_stacktraces", "symbolicate-jvm", json=json
-        )
+        return self._process("symbolicate_jvm_stacktraces", "symbolicate-jvm", json=json)
 
 
 class TaskIdNotFound(Exception):
@@ -322,9 +314,7 @@ class SymbolicatorSession:
                 with metrics.timer(
                     "events.symbolicator.session.request", tags={"attempt": attempts}
                 ):
-                    response = self.session.request(
-                        method, url, timeout=self.timeout + 1, **kwargs
-                    )
+                    response = self.session.request(method, url, timeout=self.timeout + 1, **kwargs)
 
                 metrics.incr(
                     "events.symbolicator.status_code",
